@@ -31,9 +31,17 @@
       display: flex;
       justify-content: space-between;
       align-items: center;
-      font-size: 1rem;
+      flex-wrap: wrap;
+      gap: 8px 16px;
+      font-size: 0.95rem;
       font-weight: 600;
       padding: 0 4px;
+    }
+
+    .hud-sub {
+      color: #93c5fd;
+      font-weight: 500;
+      font-size: 0.85rem;
     }
 
     canvas {
@@ -57,21 +65,29 @@
 </head>
 <body>
   <div class="hud">
+    <div>STAGE: <span id="stage">1</span> / 3</div>
     <div>SCORE: <span id="score">0</span></div>
+    <div>
+      BALLS: <span id="balls">1</span>
+      <span class="hud-sub">(あと <span id="next-ball">10</span> 個で+1)</span>
+    </div>
     <div>LIVES: <span id="lives">3</span></div>
   </div>
 
   <canvas id="game" width="640" height="480"></canvas>
 
   <div class="hint">
-    操作: マウス移動 / ← → キー（A / D）｜発射・リスタート: クリック または Space
+    操作: マウス移動 / ← → キー（A / D）｜発射・次へ: クリック または Space
   </div>
 
   <script>
     (() => {
       const canvas = document.getElementById("game");
       const ctx = canvas.getContext("2d");
+      const stageEl = document.getElementById("stage");
       const scoreEl = document.getElementById("score");
+      const ballsEl = document.getElementById("balls");
+      const nextBallEl = document.getElementById("next-ball");
       const livesEl = document.getElementById("lives");
 
       const WIDTH = canvas.width;
@@ -85,11 +101,10 @@
 
       // ボール設定
       const BALL_RADIUS = 8;
-      const BALL_SPEED = 360; // px/sec
       const MAX_BOUNCE_ANGLE = (60 * Math.PI) / 180;
+      const BLOCKS_PER_EXTRA_BALL = 10;
 
       // ブロック設定
-      const BRICK_ROWS = 5;
       const BRICK_COLS = 8;
       const BRICK_WIDTH = 64;
       const BRICK_HEIGHT = 22;
@@ -97,14 +112,60 @@
       const BRICK_OFFSET_TOP = 52;
       const BRICK_OFFSET_LEFT =
         (WIDTH - (BRICK_COLS * BRICK_WIDTH + (BRICK_COLS - 1) * BRICK_GAP)) / 2;
-      const ROW_COLORS = ["#ef4444", "#f97316", "#eab308", "#22c55e", "#3b82f6"];
+
+      const COLOR_MAP = {
+        "1": "#ef4444",
+        "2": "#f97316",
+        "3": "#eab308",
+        "4": "#22c55e",
+        "5": "#3b82f6",
+      };
+
+      // 3ステージ構成（各ステージ 40 / 30 / 40 個）
+      const STAGES = [
+        {
+          speed: 350,
+          layout: [
+            "11111111",
+            "22222222",
+            "33333333",
+            "44444444",
+            "55555555",
+          ],
+        },
+        {
+          speed: 380,
+          layout: [
+            "111..111",
+            ".222222.",
+            "..3333..",
+            "..4444..",
+            ".555555.",
+            "11....11",
+          ],
+        },
+        {
+          speed: 410,
+          layout: [
+            "11111111",
+            "2.2222.2",
+            "33.33.33",
+            "444..444",
+            "5.5555.5",
+            "11111111",
+          ],
+        },
+      ];
 
       const keys = { left: false, right: false };
 
-      let state = "ready"; // "ready" | "playing" | "cleared" | "gameover"
+      let state = "ready"; // "ready" | "playing" | "stageclear" | "cleared" | "gameover"
+      let stageIndex = 0;
       let score = 0;
       let lives = 3;
+      let brokenCount = 0;
       let bricks = [];
+      let balls = [];
 
       const paddle = {
         x: (WIDTH - PADDLE_WIDTH) / 2,
@@ -113,24 +174,24 @@
         height: PADDLE_HEIGHT,
       };
 
-      const ball = {
-        x: WIDTH / 2,
-        y: PADDLE_Y - BALL_RADIUS,
-        vx: 0,
-        vy: 0,
-        radius: BALL_RADIUS,
-      };
+      function getCurrentSpeed() {
+        return STAGES[stageIndex].speed;
+      }
 
-      function createBricks() {
+      function createBricks(index) {
         const list = [];
-        for (let row = 0; row < BRICK_ROWS; row++) {
-          for (let col = 0; col < BRICK_COLS; col++) {
+        const layout = STAGES[index].layout;
+        for (let row = 0; row < layout.length; row++) {
+          const line = layout[row];
+          for (let col = 0; col < line.length; col++) {
+            const ch = line[col];
+            if (!COLOR_MAP[ch]) continue;
             list.push({
               x: BRICK_OFFSET_LEFT + col * (BRICK_WIDTH + BRICK_GAP),
               y: BRICK_OFFSET_TOP + row * (BRICK_HEIGHT + BRICK_GAP),
               width: BRICK_WIDTH,
               height: BRICK_HEIGHT,
-              color: ROW_COLORS[row % ROW_COLORS.length],
+              color: COLOR_MAP[ch],
               alive: true,
             });
           }
@@ -138,39 +199,88 @@
         return list;
       }
 
+      function createReadyBall() {
+        return {
+          x: paddle.x + paddle.width / 2,
+          y: paddle.y - BALL_RADIUS,
+          vx: 0,
+          vy: 0,
+          radius: BALL_RADIUS,
+        };
+      }
+
+      function spawnExtraBall(sourceBall) {
+        const speed = getCurrentSpeed();
+        const baseAngle = Math.atan2(sourceBall.vy, sourceBall.vx);
+        const offset = (Math.random() < 0.5 ? 1 : -1) * ((28 * Math.PI) / 180);
+        let angle = baseAngle + offset;
+
+        // 水平近辺になって詰まらないよう縦成分を確保
+        let vx = speed * Math.cos(angle);
+        let vy = speed * Math.sin(angle);
+        const minVy = speed * 0.25;
+        if (Math.abs(vy) < minVy) {
+          vy = (vy >= 0 ? 1 : -1) * minVy;
+          const norm = Math.hypot(vx, vy);
+          vx = (vx / norm) * speed;
+          vy = (vy / norm) * speed;
+        }
+
+        return {
+          x: sourceBall.x,
+          y: sourceBall.y,
+          vx,
+          vy,
+          radius: BALL_RADIUS,
+        };
+      }
+
       function updateHud() {
+        const remaining =
+          BLOCKS_PER_EXTRA_BALL - (brokenCount % BLOCKS_PER_EXTRA_BALL);
+        stageEl.textContent = String(stageIndex + 1);
         scoreEl.textContent = String(score);
+        ballsEl.textContent = String(balls.length);
+        nextBallEl.textContent = String(remaining);
         livesEl.textContent = String(lives);
       }
 
       function resetBallOnPaddle() {
-        ball.x = paddle.x + paddle.width / 2;
-        ball.y = paddle.y - ball.radius;
-        ball.vx = 0;
-        ball.vy = 0;
+        balls = [createReadyBall()];
+        updateHud();
+      }
+
+      function loadStage(index) {
+        stageIndex = index;
+        bricks = createBricks(stageIndex);
+        paddle.x = (WIDTH - paddle.width) / 2;
+        state = "ready";
+        resetBallOnPaddle();
       }
 
       function initGame() {
         score = 0;
         lives = 3;
-        bricks = createBricks();
-        paddle.x = (WIDTH - paddle.width) / 2;
-        state = "ready";
-        resetBallOnPaddle();
-        updateHud();
+        brokenCount = 0;
+        loadStage(0);
       }
 
-      function launchBall() {
+      function handleAction() {
         if (state === "cleared" || state === "gameover") {
           initGame();
+          return;
+        }
+        if (state === "stageclear") {
+          loadStage(stageIndex + 1);
           return;
         }
         if (state !== "ready") return;
 
         // 少しランダムな角度で上向きに発射
+        const speed = getCurrentSpeed();
         const angle = ((Math.random() * 40 - 20) * Math.PI) / 180;
-        ball.vx = BALL_SPEED * Math.sin(angle);
-        ball.vy = -BALL_SPEED * Math.cos(angle);
+        balls[0].vx = speed * Math.sin(angle);
+        balls[0].vy = -speed * Math.cos(angle);
         state = "playing";
       }
 
@@ -197,42 +307,134 @@
       }
 
       function update(dt) {
-        // キーボードによるパドル移動
         if (keys.left) paddle.x -= PADDLE_SPEED * dt;
         if (keys.right) paddle.x += PADDLE_SPEED * dt;
         clampPaddle();
 
         if (state === "ready") {
-          resetBallOnPaddle();
+          balls[0].x = paddle.x + paddle.width / 2;
+          balls[0].y = paddle.y - balls[0].radius;
           return;
         }
 
         if (state !== "playing") return;
 
-        ball.x += ball.vx * dt;
-        ball.y += ball.vy * dt;
+        const speed = getCurrentSpeed();
+        const survivingBalls = [];
+        const spawnedBalls = [];
+        let stageCleared = false;
 
-        // 左右の壁
-        if (ball.x - ball.radius < 0) {
-          ball.x = ball.radius;
-          ball.vx = Math.abs(ball.vx);
-        } else if (ball.x + ball.radius > WIDTH) {
-          ball.x = WIDTH - ball.radius;
-          ball.vx = -Math.abs(ball.vx);
+        for (const ball of balls) {
+          ball.x += ball.vx * dt;
+          ball.y += ball.vy * dt;
+
+          // 左右の壁
+          if (ball.x - ball.radius < 0) {
+            ball.x = ball.radius;
+            ball.vx = Math.abs(ball.vx);
+          } else if (ball.x + ball.radius > WIDTH) {
+            ball.x = WIDTH - ball.radius;
+            ball.vx = -Math.abs(ball.vx);
+          }
+
+          // 上の壁
+          if (ball.y - ball.radius < 0) {
+            ball.y = ball.radius;
+            ball.vy = Math.abs(ball.vy);
+          }
+
+          // 下端から落ちたボールは除外
+          if (ball.y - ball.radius > HEIGHT) {
+            continue;
+          }
+
+          // パドルとの当たり判定（下向き移動中のみ）
+          if (ball.vy > 0) {
+            const hit = circleIntersectsRect(
+              ball.x,
+              ball.y,
+              ball.radius,
+              paddle.x,
+              paddle.y,
+              paddle.width,
+              paddle.height
+            );
+            if (hit) {
+              const hitRatio =
+                (ball.x - (paddle.x + paddle.width / 2)) / (paddle.width / 2);
+              const clampedRatio = Math.max(-1, Math.min(1, hitRatio));
+              const bounceAngle = clampedRatio * MAX_BOUNCE_ANGLE;
+              ball.vx = speed * Math.sin(bounceAngle);
+              ball.vy = -speed * Math.cos(bounceAngle);
+              ball.y = paddle.y - ball.radius;
+            }
+          }
+
+          // ブロックとの当たり判定（1フレーム1個まで処理）
+          for (const brick of bricks) {
+            if (!brick.alive) continue;
+            const hit = circleIntersectsRect(
+              ball.x,
+              ball.y,
+              ball.radius,
+              brick.x,
+              brick.y,
+              brick.width,
+              brick.height
+            );
+            if (!hit) continue;
+
+            brick.alive = false;
+            score += 10;
+            brokenCount += 1;
+
+            const overlapLeft = ball.x + ball.radius - brick.x;
+            const overlapRight =
+              brick.x + brick.width - (ball.x - ball.radius);
+            const overlapTop = ball.y + ball.radius - brick.y;
+            const overlapBottom =
+              brick.y + brick.height - (ball.y - ball.radius);
+            const minOverlapX = Math.min(overlapLeft, overlapRight);
+            const minOverlapY = Math.min(overlapTop, overlapBottom);
+
+            if (minOverlapX < minOverlapY) {
+              ball.vx = -ball.vx;
+            } else {
+              ball.vy = -ball.vy;
+            }
+
+            if (brokenCount % BLOCKS_PER_EXTRA_BALL === 0) {
+              spawnedBalls.push(spawnExtraBall(ball));
+            }
+            break;
+          }
+
+          survivingBalls.push(ball);
+
+          if (bricks.every((b) => !b.alive)) {
+            stageCleared = true;
+            break;
+          }
         }
 
-        // 上の壁
-        if (ball.y - ball.radius < 0) {
-          ball.y = ball.radius;
-          ball.vy = Math.abs(ball.vy);
-        }
-
-        // 下端（ミス判定）
-        if (ball.y - ball.radius > HEIGHT) {
-          lives -= 1;
+        if (stageCleared) {
+          if (stageIndex + 1 < STAGES.length) {
+            state = "stageclear";
+          } else {
+            state = "cleared";
+          }
           updateHud();
+          return;
+        }
+
+        balls = survivingBalls.concat(spawnedBalls);
+
+        // すべてのボールが落ちたらライフを減らす
+        if (balls.length === 0) {
+          lives -= 1;
           if (lives <= 0) {
             state = "gameover";
+            updateHud();
           } else {
             state = "ready";
             resetBallOnPaddle();
@@ -240,66 +442,7 @@
           return;
         }
 
-        // パドルとの当たり判定（下向き移動中のみ）
-        if (ball.vy > 0) {
-          const hit = circleIntersectsRect(
-            ball.x,
-            ball.y,
-            ball.radius,
-            paddle.x,
-            paddle.y,
-            paddle.width,
-            paddle.height
-          );
-          if (hit) {
-            const hitRatio =
-              (ball.x - (paddle.x + paddle.width / 2)) / (paddle.width / 2);
-            const clampedRatio = Math.max(-1, Math.min(1, hitRatio));
-            const bounceAngle = clampedRatio * MAX_BOUNCE_ANGLE;
-            ball.vx = BALL_SPEED * Math.sin(bounceAngle);
-            ball.vy = -BALL_SPEED * Math.cos(bounceAngle);
-            ball.y = paddle.y - ball.radius;
-          }
-        }
-
-        // ブロックとの当たり判定（1フレーム1個まで処理）
-        for (const brick of bricks) {
-          if (!brick.alive) continue;
-          const hit = circleIntersectsRect(
-            ball.x,
-            ball.y,
-            ball.radius,
-            brick.x,
-            brick.y,
-            brick.width,
-            brick.height
-          );
-          if (!hit) continue;
-
-          brick.alive = false;
-          score += 10;
-          updateHud();
-
-          // 重なりの浅い軸を反転させる
-          const overlapLeft = ball.x + ball.radius - brick.x;
-          const overlapRight = brick.x + brick.width - (ball.x - ball.radius);
-          const overlapTop = ball.y + ball.radius - brick.y;
-          const overlapBottom = brick.y + brick.height - (ball.y - ball.radius);
-          const minOverlapX = Math.min(overlapLeft, overlapRight);
-          const minOverlapY = Math.min(overlapTop, overlapBottom);
-
-          if (minOverlapX < minOverlapY) {
-            ball.vx = -ball.vx;
-          } else {
-            ball.vy = -ball.vy;
-          }
-          break;
-        }
-
-        // 全破壊チェック
-        if (bricks.every((b) => !b.alive)) {
-          state = "cleared";
-        }
+        updateHud();
       }
 
       function drawOverlay(title, subtitle) {
@@ -331,15 +474,28 @@
         ctx.fillRect(paddle.x, paddle.y, paddle.width, paddle.height);
 
         // ボール描画
-        ctx.beginPath();
-        ctx.arc(ball.x, ball.y, ball.radius, 0, Math.PI * 2);
         ctx.fillStyle = "#f9fafb";
-        ctx.fill();
+        for (const ball of balls) {
+          ctx.beginPath();
+          ctx.arc(ball.x, ball.y, ball.radius, 0, Math.PI * 2);
+          ctx.fill();
+        }
 
         if (state === "ready") {
-          drawOverlay("READY", "クリック または Space で発射");
+          drawOverlay(
+            `STAGE ${stageIndex + 1}`,
+            "クリック または Space で発射"
+          );
+        } else if (state === "stageclear") {
+          drawOverlay(
+            `STAGE ${stageIndex + 1} CLEAR!`,
+            "クリック または Space で次のステージへ"
+          );
         } else if (state === "cleared") {
-          drawOverlay("GAME CLEAR!", "クリック または Space でもう一度遊ぶ");
+          drawOverlay(
+            "ALL STAGES CLEAR!",
+            "クリック または Space でもう一度遊ぶ"
+          );
         } else if (state === "gameover") {
           drawOverlay("GAME OVER", "クリック または Space でリスタート");
         }
@@ -353,7 +509,7 @@
           keys.right = true;
         } else if (e.code === "Space" || e.key === "Enter") {
           e.preventDefault();
-          launchBall();
+          handleAction();
         }
       });
 
@@ -369,15 +525,19 @@
         movePaddleToClientX(e.clientX);
       });
 
-      canvas.addEventListener("touchmove", (e) => {
-        if (e.touches.length > 0) {
-          e.preventDefault();
-          movePaddleToClientX(e.touches[0].clientX);
-        }
-      }, { passive: false });
+      canvas.addEventListener(
+        "touchmove",
+        (e) => {
+          if (e.touches.length > 0) {
+            e.preventDefault();
+            movePaddleToClientX(e.touches[0].clientX);
+          }
+        },
+        { passive: false }
+      );
 
       canvas.addEventListener("click", () => {
-        launchBall();
+        handleAction();
       });
 
       let lastTime = performance.now();
